@@ -1,0 +1,6 @@
+anthropic
+python-dotenv
+flask
+PyPDF2
+streamlit
+httpx
