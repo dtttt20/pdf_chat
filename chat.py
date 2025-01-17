@@ -10,6 +10,10 @@ import os
 
 load_dotenv()
 
+# Initialize session state for prompt caching
+if "prompt_caching" not in st.session_state:
+    st.session_state.prompt_caching = True
+
 def split_pdf(pdf_file, max_size_mb=32, max_pages=100):
     """Split PDF into chunks based on size and page limits"""
     # Reset file pointer to beginning
@@ -70,13 +74,6 @@ def chat_with_pdf(pdf_data, user_question):
         
     client = anthropic.Anthropic(api_key=api_key)
     
-    # Debug info
-    if isinstance(pdf_data, (io.BytesIO, io.StringIO)):
-        pdf_data = pdf_data.getvalue()
-    
-    pdf_size_mb = len(pdf_data) / (1024 * 1024)
-    st.write(f"Chunk size being sent to API: {pdf_size_mb:.2f} MB")
-    
     try:
         # Verify PDF is valid before sending
         try:
@@ -119,8 +116,67 @@ def chat_with_pdf(pdf_data, user_question):
             st.error(f"API Response: {e.response.text if hasattr(e.response, 'text') else e.response}")
         return None
 
-# Streamlit UI
+# Initialize session state for messages
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+def count_tokens(pdf_data, text):
+    """Count tokens using Anthropic's token counter"""
+    try:
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        message_content = [
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": base64.b64encode(pdf_data).decode('utf-8')
+                }
+            },
+            {
+                "type": "text",
+                "text": text if text else "."  # Use a period if text is empty
+            }
+        ]
+        
+        response = client.beta.messages.count_tokens(
+            betas=["token-counting-2024-11-01", "pdfs-2024-09-25"],
+            model="claude-3-5-sonnet-20241022",
+            messages=[{"role": "user", "content": message_content}]
+        )
+        
+        return response.input_tokens
+    except Exception as e:
+        st.error(f"Error counting tokens: {str(e)}")
+        return None
+
+def display_chat_interface(pdf_data):
+    # Display all messages using Streamlit's native chat components
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # Chat input
+    if prompt := st.chat_input("Ask a question about the PDF..."):
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = chat_with_pdf(pdf_data, prompt)
+                if response:
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+
+# Main UI
 st.title("PDF Chat with Claude")
+
+# Add the toggle in sidebar before file upload
+with st.sidebar:
+    st.toggle("Enable Prompt Caching", key="prompt_caching", value=True)
 
 uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
@@ -139,12 +195,17 @@ if uploaded_file is not None:
         else:
             pdf_data = pdf_chunks[0][2]
 
-        user_question = st.text_input("Ask a question about the PDF:")
-        
-        if st.button("Send") and user_question:
-            with st.spinner("Claude is thinking..."):
-                response = chat_with_pdf(pdf_data, user_question)
-                if response:
-                    st.write(response)
+        # Add token count here
+        token_count = count_tokens(pdf_data, "")
+        if token_count:
+            st.write(f"Total tokens: {token_count}")
+
+        if st.button("Clear Chat History"):
+            st.session_state.messages = []
+            st.rerun()
+
+        # Display chat interface
+        display_chat_interface(pdf_data)
+
     except Exception as e:
         st.error(f"Error processing PDF: {str(e)}")
